@@ -1,0 +1,185 @@
+// inside EOS.h
+#ifndef EOS_H
+#define EOS_H
+
+#include "stdafx.h"
+
+// note: all values in SI
+class EOS
+{
+private:
+	// private constants
+	static const double ITERATE_PRECISION; // precision when iterating
+	static const double DIFF_PRECISION;    // precision when differentiating
+
+	// private variables
+	bool isFunctional; // is this a functional EOS?
+	bool isMix;        // is this a mix of functional EOSs?
+	bool isTabular;    // is this a tabular EOS?
+	bool isThermal;    // does this use thermal corrections?
+
+	// arrays of values for tabular EOS
+	int tabNumVals;      // number of data points in tabular EOS
+	vector<double> tabP;
+	vector<double> tabRho;
+	vector<double> tabdPdRho;
+	vector<double> tabd2PdRho2;
+
+	// arrays of values for tabular debye function
+	int debNumVals;      // number of data points in tabular debye function
+        vector<double> debX;
+        vector<double> debY;
+
+	int eosNum;        // identifier number for functional EOS
+	int eosNum2;       // identifier number for second functional EOS in mixes
+	double mixFrac;    // fraction of eosNum in mixes
+	int thermNum;      // identifier number for thermal correction
+
+
+public:
+	// setup functions
+	EOS ();                          // makes a new EOS instance
+	EOS (const EOS& copy_from);      // makes a deep copy of EOS "copy_from"
+	void setNum(int eosNum);         // sets the EOS to function number "eosNum"
+	// sets the EOS to a volume-addition mix at rate mixFrac of function numbers "eosNum1" and "eosNum2"
+	void setMix(int eosNum1, int eosNum2, double mixFrac);
+	void setMixTab(string filename);  // sets the EOS to the tabular data found at "filename"
+        void setEntTab(double entropy, double metals);
+	void setThermal(int thermNum);   // sets the EOS to thermal correction number "thermNum"
+
+	int getEosNum();                 // returns the current eosNum
+	bool isTherm();
+	double getMolETherm(double T);   // molar thermal energy (Debye model)
+
+	// main functions
+	double getP(double rho, double T = 0.0);        // returns density at argument pressure and temperature
+	double getPNoTherm(double P, double T = 0.0);   // getP without thermal correction
+	double getRho(double P, double T = 0.0);        // returns pressure at argument pressure and temperature
+	double getdPdRho(double rho, double T = 0.0);   // returns dPdRho at argument density and temperature
+	double getd2PdRho2(double rho, double T = 0.0); // returns d2PdRho2 at argument density and temperature
+
+	double getBeta(double P, double T = 0.0);       // returns thermal expansion coefficient per unit temperature at given P, T
+
+	void printEOS(double step, double startP, double endP, double T, string filename); // prints the equation of state with given logarithmic step to given filename
+	void printEOSRho(double step, double startRho, double endRho, double T, string filename); // prints on given rho range
+
+private:
+	// --- private functions ---
+        // --- setup functions ---
+        // resets all "type of EOS" variables to false/null
+	void reset();               
+        // returns the molar mass of the given eos num (in g/mol)
+        double getMolMass(int eosNum);
+
+	// --- get pressure functions ---
+        // getP with thermal correction
+	double getPTherm(double P, double T = 0.0);
+        // getP for functional EOS
+	double getPFunc(double rho, double T = 0.0);
+        // getP for functional mix EOS
+	double getPMix(double rho, double T = 0.0);
+        // getP for tabular EOS
+	double getPTab(double rho, double T = 0.0);
+        // added P due to thermal effect
+	double getDeltaPTherm(double rho, double T = 0.0);
+        // gruneisen parameter from SESAME extrapolation
+	double grunSESAME(double grun0, double rho);
+        // (third order) debye function from tabular data
+	double debyeFunc(double x);
+        // getP for polytropic functional EOS
+	double getPPoly(double rho, double K, double n);
+        // getP for modified polytropic functional EOS
+	double getPModPoly(double rho, double rho0, double c, double n);
+        // getP for Vinet functional EOS
+	double getPVinet(double rho, double rho0, double K0, 
+                         double K01);
+        // getP for 3rd order BME functional EOS
+	double getPBME3(double rho, double rho0, double K0, double K01);
+        // getP for 4th order BME functional EOS
+	double getPBME4(double rho, double rho0, double K0, double K01,
+                        double K02); 
+        // getP for approximate TFD functional EOS (Salpeter & Zapolsky 1967)
+	double getPTFDapprox67(double rho, double Z, double A);
+        // getP for approximate TFD functional EOS (Zapolsky & Salpeter 1969)
+	// for monatomic elements, this gives the total pressure (set Zav=Z)
+	// for molecules, add the pressures of each element
+	double getPTFDapprox69(double rho, double Z, double A);
+        // getP for TFD functional EOS (PANDA)
+	double getPTFDPANDA(double rho, double Z, double A, double Zav);
+
+	// --- get density functions ---
+        // getRho with thermal correction, uses iteration to find correct rho
+	double getRhoTherm(double P, double T = 0.0);
+        // getRho without thermal correction
+        // uses Newton's method
+	double getRhoNoTherm(double P, double T = 0.0);
+	double getRhoFunc(double rho, double T = 0.0);  
+	double getRhoMix(double P, double T = 0.0);
+	double getRhoTab(double P, double T = 0.0);
+
+	// --- get dPdRho functions ---
+        // getdPdRho directily from tabular data for dPdRho, d2PdRho2
+	double getdPdRhoTab(double rho, double T = 0.0);
+        // getdPdRho by approximation from getP
+	double getdPdRhoNoTab(double rho, double T = 0.0);
+};
+
+class ConvergenceFailureException: public std::exception
+{
+   virtual const char* what()
+   {
+      return "Failure to converge.";
+   }
+};
+
+#endif // EOS_H
+
+// EOS numbers (for eosNum):
+//-1: white dwarf polytrope (testing)
+//-7: n=1 polytrope (testing)
+//-6: Fe TFD (Salpeter & Zapolsky 1967)
+//-5: MgSiO3 (pv) 4th order BME (Seager et al. 2007)
+//-4: Fe Vinet (Seager et al. 2007)
+//-3: H2O Ice VII BME3 (Wolanin et al. 1997) (testing)
+//-2: Platinum BME4        (Sun et al. 2008) (testing)
+// 0: Fe (epsilon) BME3    (Daewaele et al. 2006) (testing)
+// 1: Fe (epsilon) Vinet   (Daewaele et al. 2006)
+// 2: MgSiO3 (pv) Vinet    (Tsuchiya et al. 2004)
+// 3: MgO (periclase) BME3 (Speziale et al. 2001)
+// 4: SiC (ZB + RS) BME3   (Lu et al. 2008)
+// 5: Diamond Vinet        (Kunc et al. 2003)
+// 6: Platinum Vinet       (Sun et al. 2008)
+// 7: H2O Ice VII Vinet    (Wolanin et al. 1997)
+
+// Thermal EOS numbers (for thermNum)
+// 1: Fe (epsilon)    (Daewaele et al. 2006)
+// 2: MgSiO3 (pv)     (Tsuchiya et al. 2004)
+// 3: MgO (periclase) (Speziale et al. 2001)
+// 5: Diamond         (Kunc et al. 2003)
+// 6: Platinum        (Sun et al. 2008)
+
+// Old EOS numbers (for eosNum):
+//-1: white dwarf polytrope (testing)
+// 0: Fe modified polytropic
+// 1: Fe Vinet (Seager)
+// 2: MgSiO3 (pv) BME4
+// 3: Fe Vinet (Valencia)
+// 4: perovskite modified polytropic
+// 5: olivine Vinet
+// 6: (Mg,Fe)SiO3 BME3
+// 7: Fe0.8(FeS)0.2 Vinet
+// 8: (Mg,Fe)SiO3 modified polytropic
+// 9: MgSiO3 (pv) BME3
+//10: pv+fmw Vinet
+//11: ppv+fmw Vinet
+//12: wd+rw (high-pressure olivine) Vinet
+//13: olivine BME3 (Sotin)
+//14: Fe TFD (Approximate Salpeter & Zapolsky 1967)
+//15: Fe TFD (PANDA)
+//16: SiC (Seager)
+//17:
+//18: H2O Ice VIII and X Vinet (Seager)
+//19: H2O Ice VII (Seager)
+//20: H2O Ice mix (Seager)
+//21: Diamond (Surratt et al. 1973) BME3
+//22: Diamond (Surratt et al. 1973) Vinet

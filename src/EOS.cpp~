@@ -1,0 +1,726 @@
+/*
+ * Represents an Equation of State
+ * Wesley Verne
+ */
+
+#include "stdafx.h"
+#include "files.h"
+#include "HHeComp.h"
+
+using namespace cons;
+
+// private constants
+const double EOS::ITERATE_PRECISION = 0.000001; // Required precision for rho and P.
+const double EOS::DIFF_PRECISION    = 0.000001; // Sets the delta for rho, P, and T.
+
+// public functions
+// setup functions
+EOS::EOS()
+{
+   isFunctional = false;
+   isMix        = false;
+   isTabular    = false;
+   isThermal    = false;
+}
+
+EOS::EOS(const EOS& copy_from)
+{
+   this->isFunctional = copy_from.isFunctional;
+   this->isMix        = copy_from.isMix;
+   this->isTabular    = copy_from.isTabular;
+   this->isThermal    = copy_from.isThermal;
+
+   if (isFunctional)
+      this->eosNum = copy_from.eosNum;
+   else if (isMix)
+   {
+      this->eosNum  = copy_from.eosNum;
+      this->eosNum2 = copy_from.eosNum2;
+      this->mixFrac = copy_from.mixFrac;
+   }
+   else if (isTabular)
+   {
+      this->tabNumVals = copy_from.tabNumVals;
+      this->tabP = vector<double>(tabNumVals,0);
+      this->tabRho = vector<double>(tabNumVals);
+      this->tabdPdRho = vector<double>(tabNumVals);
+      this->tabd2PdRho2 = vector<double>(tabNumVals);
+      for (int i = 0; i < tabNumVals; i++)
+      {
+	 this->tabP[i] = copy_from.tabP[i];
+	 this->tabRho[i] = copy_from.tabRho[i];
+	 this->tabdPdRho[i] = copy_from.tabdPdRho[i];
+	 this->tabd2PdRho2[i] = copy_from.tabd2PdRho2[i];
+      }
+   }
+
+   if (isThermal)
+   {
+      this->thermNum = copy_from.thermNum;
+      this->debNumVals = copy_from.debNumVals;
+      this->debX = vector<double>(debNumVals,0);
+      this->debY = vector<double>(debNumVals,0);
+      for (int i = 0; i < debNumVals; i++)
+      {
+	 this->debX[i] = copy_from.debX[i];
+	 this->debY[i] = copy_from.debY[i];
+      }
+   }
+}
+
+void EOS::setNum(int newEosNum)
+{
+   reset();
+
+   isFunctional = true;
+   eosNum = newEosNum;
+}
+
+void EOS::setMix(int newEosNum1, int newEosNum2, double newMixFrac)
+{
+   reset();
+
+   isMix = true;
+   eosNum  = newEosNum1;
+   eosNum2 = newEosNum2;
+   mixFrac = newMixFrac;
+}
+
+void EOS::setMixTab(string filename)
+{
+   reset();
+
+   isTabular = true;
+
+   // EOS read
+   std::ifstream datfile(filename.c_str());
+   if (!datfile)
+      std::cout << "EOS File Not Found" << std::endl;
+	
+   char* store = new char[100];
+   datfile.getline(store, 100);
+
+   double temp;
+   tabNumVals = -1;
+
+   while(!datfile.eof())
+   {
+      datfile >> temp;
+      tabNumVals++;
+   }
+
+   tabNumVals /= 4;
+
+   tabP        = vector<double>(tabNumVals,0);
+   tabRho      = vector<double>(tabNumVals,0);
+   tabdPdRho   = vector<double>(tabNumVals,0);
+   tabd2PdRho2 = vector<double>(tabNumVals,0);
+	
+   std::ifstream datfile2(filename.c_str());
+   datfile2.getline(store, 100);
+   delete [] store;
+
+   for(int i = 0; i < tabNumVals; i++)
+   {
+      datfile2 >> tabP[i] >> tabRho[i] >> tabdPdRho[i] >> tabd2PdRho2[i];
+      tabP[i]        *= 1e11;
+      tabRho[i]      *= 1000;
+      tabdPdRho[i]   *= 1e8;
+      tabd2PdRho2[i] *= 1e5;
+   }
+}
+
+void EOS::setEntTab(double entropy, double metal)
+{
+  reset();
+  //metal *= 0.00276;
+  double mmw = 16.93; // mmw of metals, assuming no molecules form
+
+  isTabular = true;  
+  HHeComp* hhe = new HHeComp(metal);
+
+  // compute EOS Table
+  tabP = vector<double>(950,0);
+  for(int i=0; i<950; i++){
+    tabP[i] = 5.623413252e4 * pow(10,i/100.);
+  }
+
+  tabRho      = vector<double>(950,0);
+  tabdPdRho   = vector<double>(950,0);
+  tabd2PdRho2 = vector<double>(950,0);
+  for(int i=0; i<950; i++){
+    hhe->newton(tabP[i]*10.,entropy); // given pressure and entropy, solves density and temperature
+    tabRho[i] = pow(10,hhe->getRho())*1000.;
+    tabdPdRho[i] = hhe->getdPdRho()*1.e8;
+
+    if(tabdPdRho[i]<0) tabdPdRho[i] = 2*tabdPdRho[i-1] - tabdPdRho[i-2];
+    if(i>0) tabd2PdRho2[i] = (tabdPdRho[i]-tabdPdRho[i-1]) / (tabRho[i]-tabRho[i-1]);
+  }
+  tabd2PdRho2[0] = 2*tabd2PdRho2[2];
+  if(tabd2PdRho2[0]<0) tabd2PdRho2[0] = 0.;
+  tabNumVals = 950;
+  delete hhe;
+}
+
+void EOS::setThermal(int newThermNum)
+{
+   thermNum = newThermNum;
+
+   if (!isThermal)
+   {
+      isThermal = true;
+
+      // debye function read
+      string debFilename = "debye.txt";
+      std::ifstream datfile(debFilename.c_str());
+      if (!datfile)
+	 std::cout << datfile << std::endl;
+		
+      char* store = new char[100];
+      datfile.getline(store, 100);
+	
+      double temp;
+      debNumVals = -1;
+	
+      while(!datfile.eof())
+      {
+	 datfile >> temp;
+	 debNumVals++;
+      }
+	
+      debNumVals /= 2;
+	
+      debX       = vector<double>(debNumVals,0);
+      debY       = vector<double>(debNumVals,0);
+		
+      std::ifstream datfile2(debFilename.c_str());
+      datfile2.getline(store, 100);
+      delete [] store;
+	
+      for(int i = 0; i < debNumVals; i++)
+	 datfile2 >> debX[i] >> debY[i];
+   }
+}
+
+int EOS::getEosNum()
+{
+   if (isFunctional)
+      return eosNum;
+   else
+      throw "Wrong EOS setting";
+}
+
+bool EOS::isTherm()
+{
+   return isThermal;
+}
+
+double EOS::getMolETherm(double T)
+{
+   double debyeT;
+   switch (thermNum)
+   {
+      case 1:      // 1: Fe (epsilon) (Daewaele et al. 2006)
+	 debyeT = 417.0;  break;
+      case 2:      // 2: MgSiO3 (pv) (Tsuchiya et al. 2004)
+	 debyeT = 1114.0; break;
+      case 3:      // 3: MgO (Beg 1976)
+	 debyeT = 743.0;  break;
+      case 5:      // 5: Diamond (Kunc et al. 2003)
+	 debyeT = 2070.0; break;
+      case 6:      // 6: Platinum (Sun et al. 2008)
+	 debyeT = 225.0;  break;
+      default:
+	 throw "thermNum not implemented";
+   }
+   return 3 * R * T * debyeFunc(debyeT/T);
+}
+
+// main functions
+double EOS::getP(double rho, double T)
+{
+  if (isThermal) return getPTherm(rho, T);
+  else           return getPNoTherm(rho, T);
+}
+
+double EOS::getPNoTherm(double rho, double T)
+{
+   if (isFunctional)   return getPFunc(rho, T);
+   else if (isMix)     return getPMix(rho, T);
+   else if (isTabular) return getPTab(rho, T);
+   else throw "EOS not set";
+}
+
+double EOS::getRho(double P, double T)
+{
+   if (isThermal) return getRhoTherm(P, T);
+   else           return getRhoNoTherm(P, T);
+}
+
+double EOS::getdPdRho(double rho, double T)
+{
+   if (isTabular && !isThermal) return getdPdRhoTab(rho, T);
+   else                         return getdPdRhoNoTab(rho, T);
+}
+
+double EOS::getd2PdRho2(double rho, double T)
+{
+   if (getP(rho, 0.0) > 0.0)
+      return (getdPdRho(rho * (1 + DIFF_PRECISION), T) 
+	      - getdPdRho(rho * (1 - DIFF_PRECISION), T)) 
+	 / (rho * 2 * DIFF_PRECISION);
+   else
+   {
+      double rho0 = getRho(0.0, 0.0);
+      return (getdPdRho(rho0 * (1 + DIFF_PRECISION), T) 
+	 - getdPdRho(rho0, T)) / (rho * DIFF_PRECISION);
+}
+}
+
+double EOS::getBeta(double P, double T)
+{
+   if (!isThermal)
+      throw "No Thermal EOS Set";
+   if (T > 0)
+      return (1 - getRho(P, T * (1 + DIFF_PRECISION))
+	      / getRho(P, T)) / (T * DIFF_PRECISION);
+   else
+      return (1 - getRho(P, 0.001) / getRho(P, 0)) / (0.001);
+}
+
+void EOS::printEOS(double step, double startP, double endP, double T, 
+		   string filename)
+{
+   std::ofstream outputFile;
+   outputFile.open(filename.c_str());
+   outputFile << "Pressure (Mbar) | Density (g cm^-3) | dP/dRho (Mbar g^-1 cm^3) | d^2P/dRho^2 (Mbar g^-2 cm^6) \n" << std::endl;
+
+   //double P = getP(startRho, T);
+   double P = startP;
+   double logP = log(P)/log(10.0);
+   double logEndP = log(endP)/log(10.0);
+   double oldRho = getRho(P, T);
+   while(logP < logEndP)
+   {
+      try
+      {
+	 P = pow(10, logP);
+	 double rho = getRho(P, T);
+	 if (rho < oldRho) // prevent EOS failure at high P
+	    break;
+	 outputFile << P/1e11 << " " << rho/1000 << " " 
+		    << getdPdRho(rho, T)/1e8 << " " 
+		    << getd2PdRho2(rho, T)/1e5 << std::endl;
+      }
+      catch (ConvergenceFailureException) {}
+      logP += step;
+   }
+}
+
+void EOS::printEOSRho(double step, double startRho, double endRho, double T, string filename)
+{
+   std::ofstream outputFile;
+   outputFile.open(filename.c_str());
+   outputFile << "Pressure (Mbar) | Density (g cm^-3) | dP/dRho (Mbar g^-1 cm^3) | d^2P/dRho^2 (Mbar g^-2 cm^6) \n" << std::endl;
+
+   double rho = startRho;
+   double logRho = log(rho)/log(10.0);
+   double logEndRho = log(endRho)/log(10.0);
+   double oldP = getP(rho, T);
+   while(logRho < logEndRho)
+   {
+      try
+      {
+	 rho = pow(10, logRho);
+	 double P = getP(rho, T);
+	 if (getP(pow(10, logRho + step), T) < 0) // don't print til Pnext>0
+	 {
+	    logRho += step;
+	    continue;
+	 }
+	 if ((P > 0) && (P < oldP)) // prevent EOS failure at high rho
+	    break;
+	 outputFile << P/1e11 << " " << rho/1000 << " " 
+		    << getdPdRho(rho, T)/1e8 << " " 
+		    << getd2PdRho2(rho, T)/1e5 << std::endl;
+      }
+      catch (ConvergenceFailureException) {}
+      logRho += step;
+   }
+}
+
+// private functions
+// setup functions
+void EOS::reset()
+{
+   isFunctional = false;
+   isMix        = false;
+   isTabular    = false;
+   isThermal    = false;
+   
+   eosNum   = 0;
+   eosNum2  = 0;
+   mixFrac  = 0.0;
+   thermNum = 0;
+}
+
+double EOS::getMolMass(int eosNum)
+{
+   switch (eosNum)
+   {
+      case 0:
+      case 1: // Fe
+	 return 55.845;
+      case 2: // pv
+	 return 135.96;
+      case 3: // MgO
+	 return 40.304;
+      case 4: // SiC
+	 return 40.0963;
+      case 5: // Diamond (uses single C atom)
+	 return 12.011;
+      case 6: // Platinum
+	 return 195.085;
+      case 7: // H2O Ice VII (uses single H2O molecule)
+	 return 18.015;
+      default:
+	 throw "Invalid EOS number for mix\n";
+   }
+}
+
+// main functions
+// get pressure functions
+double EOS::getPTherm(double rho, double T)
+{
+   return getPNoTherm(rho, T) + getDeltaPTherm(rho, T);
+}
+
+double EOS::getPFunc(double rho, double T)
+{
+   double temp;
+   switch (eosNum)
+   {
+      case -1: //-1: white dwarf polytrope
+	 return getPPoly(rho, K_WD, 1.5); break;
+      case -7: //-7: n=1 polytrope
+	 return getPPoly(rho, K_WD, 1.0); break;
+      case -6: //-6: Fe TFD (Salpeter & Zapolsky 1967)
+	 return getPTFDapprox67(rho, 26.0, 56.0); break;
+      case -5: //-5: MgSiO3 (pv) 4th order BME (Seager et al. 2007)
+	 return getPBME4(rho, 4100.0, 2.47e11, 3.97, -1.6e-11); break;
+      case -4: //-4: Fe (epsilon) Vinet (Seager et al. 2007)
+	 return getPVinet(rho, 8300.0, 1.562e11, 6.08); break;
+      case -3: //-3: H2O Ice VII BME3 (Wolanin et al. 1997)
+	 return getPBME3(rho, 1456.4, 1.49e10, 5.4); break;
+      case -2: //-2: Platinum BME4 (Sun et al. 2008)
+	 return getPBME4(rho, 21460.0, 2.70e11, 5.63, -3.73e-11); break;
+      case 0:  // 0: Fe (epsilon) BME3 (Daewaele et al. 2006)
+	 return getPBME3(rho, 8269.0, 1.65e11, 4.97); break;
+      case 1:  // 1: Fe (epsilon) Vinet (Daewaele et al. 2006)
+	 return getPVinet(rho, 8269.0, 1.634e11, 5.38); break;
+      case 2:  // 2: MgSiO3 (pv) Vinet (Tsuchiya et al. 2004)
+	 return getPVinet(rho, 4064.0, 2.48e11, 3.91); break;
+      case 3:  // 3: MgO (periclase) BME3 (Speziale et al. 2001)
+	 return getPBME3(rho, 3583.3, 1.602e11, 3.99); break;
+      case 4:  //4: SiC (ZB + RS) BME3 (Lu et al. 2008)
+	 // zinc blende (ZB) structure
+	 temp = getPBME3(rho,  3350.0, 2.271e11, 3.79); 
+	 if (temp < 7.5e10)
+	    return temp;
+	 else
+	    // rocksalt (RS) structure
+	    return getPBME3(rho, 4256.0, 2.666e11, 4.64);
+	 break;
+      case 5:  // 5: Diamond Vinet (Kunc et al. 2003)
+	 return getPVinet(rho, 3517.1, 4.45e11, 4.0); break;
+      case 6:  // 6: Platinum Vinet (Sun et al. 2008)
+	 return getPVinet(rho, 21460.0, 2.70e11, 5.64); break;
+      case 7:  // 7: H2O Ice VII Vinet (Wolanin et al. 1997)
+	 return getPVinet(rho, 1487.6, 1.49e10, 6.2); break;
+      default:
+	 throw "No valid eosNum set";
+   }
+}
+
+double EOS::getPMix(double rho, double T)
+{
+   double CMF = mixFrac;
+
+   isFunctional = true;
+   isMix = false;
+   double P = getP(rho, T);
+   isFunctional = false;
+   isMix = true;
+
+   double rhoNew = getRhoMix(P, T);
+
+   int i = 0;
+
+   while (abs((rho - rhoNew)/rho) > ITERATE_PRECISION)
+   {
+      double drhodP = (getRhoMix(P * (1 + DIFF_PRECISION), T) 
+		           - getRhoMix(P * (1 - DIFF_PRECISION), T)) 
+	                   / (2 * P * DIFF_PRECISION);
+      P -= (rhoNew - rho) / drhodP;
+      rhoNew = getRhoMix(P, T);
+
+      if (++i > 100) // detect failure to converge
+	 throw ConvergenceFailureException();
+   }
+   return P;
+}
+
+double EOS::getPTab(double rho, double T)
+{
+   // find index for which tabRho[index-1] <= rho <= tabRho[index]
+   int index = findIndex(rho, tabRho, tabNumVals);
+   
+   if (index == -1)
+      return 0.0;
+   if (index == tabNumVals)
+      throw "Density exceeds tabular data";
+
+   // calculate P
+   //cout << tabRho[index-1] << endl;
+   double rho1    = tabRho[index-1];
+   double rho2    = tabRho[index];
+   double P1      = tabP[index-1];
+   double P2      = tabP[index];
+   double dPdRho1 = tabdPdRho[index-1];
+   double dPdRho2 = tabdPdRho[index];
+	
+   return splineInterp(rho, rho1, rho2, P1, P2, dPdRho1, dPdRho2);
+}
+
+double EOS::getDeltaPTherm(double rho, double T)
+{
+   switch (thermNum)
+   {
+      case 1:       // 1: Fe (epsilon) (Daewaele et al. 2006)
+	 return grunSESAME(1.875, 8269.0 / rho) * rho * getMolETherm(T) 
+                / M_FE; 
+	 break;
+      case 2:  // 2: MgSiO3 (pv) (Tsuchiya et al. 2004)
+	 return grunSESAME(1.53, 4064.0 / rho) * rho * getMolETherm(T) 
+                / M_PV;
+	 break;
+      case 3:  // 3: MgO (periclase) (Speziale et al. 2001)
+	 return grunSESAME(1.53, 3583.3 / rho) * rho * getMolETherm(T) 
+	        / M_MGO;
+	 break;
+      case 5:  // 5: Diamond (Kunc et al. 2003)
+	 return grunSESAME(0.962, 3517.1 / rho) * rho * getMolETherm(T) 
+                / M_C;
+	 break;
+      case 6:  // 6: Platinum (Sun et al. 2008)
+	 return grunSESAME(2.70, 21460.0 / rho) * rho * getMolETherm(T) 
+                / M_C;
+	 break;
+      default:
+	 throw "thermNum not implemented";
+   }
+}
+
+double EOS::grunSESAME(double grun0, double rhoRatio)  // rhoRatio = rho0/rho
+{
+   return (2.0 / 3.0) + (rhoRatio * (grun0 - (2.0 / 3.0)));
+}
+
+double EOS::debyeFunc(double x)
+{
+   int index = findIndex(x, debX, debNumVals);
+   if (index == -1)
+      return 1.0;
+   if (index == debNumVals)
+      return 0.0;
+   return linInterp(x, debX[index - 1], debX[index], debY[index - 1], 
+		         debY[index]);
+}
+
+double EOS::getPPoly(double rho, double K, double n)
+{
+   return K * pow(rho, (n + 1)/n);
+}
+
+double EOS::getPModPoly(double rho, double rho0, double c, double n)
+{
+   if (rho <= rho0)
+      return 0;
+
+   return pow((rho - rho0) / c, 1 / n);
+}
+
+double EOS::getPVinet(double rho, double rho0, double K0, double K01)
+{
+   /*if (rho < rho0)
+     return 0;//*/
+   double eta = rho / rho0;
+   return 3 * K0 * pow(eta, (2.0 / 3.0)) * (1 - pow(eta, (-1.0 / 3.0)))
+          * exp((3.0 / 2.0) * (K01 - 1) * (1 - pow(eta, (-1.0 / 3.0))));
+}
+
+double EOS::getPBME3(double rho, double rho0, double K0, double K01)
+{
+   /*if (rho < rho0)
+     return 0;//*/
+   double eta = rho / rho0;
+   return (3.0 / 2.0) * K0 * (pow(eta, (7.0 / 3.0)) 
+	       - pow(eta, (5.0 / 3.0))) * (1 + ((3.0 / 4.0) * (K01 - 4) 
+	       * (pow(eta, (2.0 / 3.0)) - 1)));
+}
+
+double EOS::getPBME4(double rho, double rho0, double K0, double K01, 
+		          double K02)
+{
+   /*if (rho < rho0)
+     return 0;//*/
+   double eta = rho / rho0;
+   double addTerm1 = (9.0/16.0) * K0 * (pow(eta, (7.0 / 3.0)) 
+			  - pow(eta, (5.0 / 3.0))) 
+                     * (pow(eta, (2.0 / 3.0)) - 1);
+   double addTerm2 = (pow(eta, (2.0 / 3.0)) - 1) 
+                     * ((K0 * K02) + (K01 * (K01 - 7)) + (143.0/9.0));
+   return getPBME3(rho, rho0, K0, K01) + (addTerm1 * addTerm2);
+}
+
+double EOS::getPTFDapprox67(double rho, double Z, double A)
+{
+   double epsilon = 0.211782714409354834482706323 * pow(Z,-2.0/3.0);
+   double phi     = 0.072112478515370419116081915539 
+                    + (epsilon / 5.76899828122963352928655324312);
+   double x0      = pow((A * Z * 3886)/rho, 1.0/3.0);
+   double zeta    = (1.0/x0) - phi;
+   return (pow(zeta,5) * pow(Z,10.0/3.0) * 9.524e12);
+}
+
+double EOS::getPTFDapprox69(double rho, double Z, double A) // broken
+{
+   double epsilon = 0.211782714409354834482706323 * pow(Z,-2.0/3.0);
+   double phi     = 0.072112478515370419116081915539 
+                    + (epsilon / 5.76899828122963352928655324312);
+   double rho0    = 0;
+   double P0      = 0;
+   return 0;
+}
+
+double EOS::getPTFDPANDA(double rho, double Z, double A, double Zav)
+{
+   double rhoGcm3 = rho/1000;
+
+   double x    = pow(A / (Z * rhoGcm3), 1.0/3.0);
+   double C1   = 0.703473 + (1.130622 * pow(Zav,2.0/3.0));
+   double C2   = 0.3 - ((0.00245 * pow(Zav,5.0/2.0)) 
+		      / (1 + (0.0028 * pow(Zav,2))));
+   double C3   = 0.6 + (0.0386 * pow(Zav,4.0/3.0));
+   double F    = (C1 * x) + (C2 * x * x) + (C3 * x * x * log(x));
+   double dFdx = C1 + (2 * C2 * x) + (2 * C3 * x * log(x)) + (C3 * x);
+   double PGPa = ((1003.475 / pow(x,5)) * (1 + ((x * dFdx)/2)) * pow(E,-F));
+
+   return PGPa * 1e9;
+}
+
+// get density functions
+double EOS::getRhoTherm(double P, double T)
+{
+   double rho = 10000;
+   while (abs((getP(rho, T) - P) / P) > ITERATE_PRECISION)
+   {
+      rho -= ((getP(rho, T) - P) / getdPdRho(rho, T));
+   }
+   return rho;
+}
+
+double EOS::getRhoNoTherm(double P, double T)
+{
+   if      (isFunctional)  return getRhoFunc(P, T);
+   else if (isMix)         return getRhoMix(P, T);
+   else if (isTabular)     return getRhoTab(P, T);
+   else throw "EOS not set";
+}
+
+double EOS::getRhoFunc(double P, double T)
+{
+   int i = 0;
+   double rho = 10000;
+   while (abs((getP(rho, T) - P) / P) > ITERATE_PRECISION)
+   {
+      if (i > 100)
+	 return rho;
+      i++;
+      rho -= ((getP(rho, T) - P) / getdPdRho(rho, T));
+   }
+   return rho;
+}
+
+double EOS::getRhoMix(double P, double T)
+{
+   double m1   = getMolMass(eosNum);
+   double m2   = getMolMass(eosNum2);
+   isFunctional = true;
+   isMix = false;
+   double rho1 = EOS::getRho(P, T);
+   int eosNumTemp = eosNum;
+   eosNum = eosNum2;
+   double rho2 = EOS::getRho(P, T);
+   isFunctional = false;
+   isMix = true;
+   eosNum = eosNumTemp;
+
+   double mixFrac2   = 1.0 - mixFrac;
+   // Chi: mol fraction
+   double chi1 = 1.0 / (1.0 + ((m1 * mixFrac2)/(m2 * mixFrac))); 
+   double chi2 = 1.0 - chi1;
+
+   double mMix  = (chi1 * m1) + (chi2 * m2);
+   return mMix / ((chi1 * m1 / rho1) + (chi2 * m2 / rho2));
+}
+
+double EOS::getRhoTab(double P, double T)
+{
+   // find index for which tabP[index-1] <= P <= tabP[index]
+   int index = findIndex(P, tabP, tabNumVals);
+
+   if (index == -1)
+      return tabRho[0];
+   if (index == tabNumVals)
+      throw "Pressure exceeds tabular data";
+
+   // calculate P
+   double P1      = tabP[index-1];
+   double P2      = tabP[index];
+   double rho1    = tabRho[index-1];
+   double rho2    = tabRho[index];
+   double dRhodP1 = 1.0 / tabdPdRho[index-1];
+   double dRhodP2 = 1.0 / tabdPdRho[index];
+	
+	
+   return splineInterp(P, P1, P2, rho1, rho2, dRhodP1, dRhodP2);
+}
+
+// get dPdRho functions
+double EOS::getdPdRhoTab(double rho, double T)
+{
+   // find index for which tabRho[index-1] <= rho <= tabRho[index]
+   int index = findIndex(rho, tabRho, tabNumVals);
+
+   if (index == -1)
+      return tabdPdRho[0];
+   if (index == tabNumVals)
+      throw "Density exceeds tabular data";
+
+   // calculate P
+   double rho1    = tabRho[index-1];
+   double rho2    = tabRho[index];
+   double dPdRho1 = tabdPdRho[index-1];
+   double dPdRho2 = tabdPdRho[index];
+   double d2PdRho21 = tabd2PdRho2[index-1];
+   double d2PdRho22 = tabd2PdRho2[index];
+
+   return splineInterp(rho, rho1, rho2, dPdRho1, dPdRho2, d2PdRho21, d2PdRho22);
+}
+
+double EOS::getdPdRhoNoTab(double rho, double T)
+{
+   return (getP(rho * (1 + DIFF_PRECISION), T) - getP(rho, T)) 
+          / (rho * DIFF_PRECISION);
+}

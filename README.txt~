@@ -1,0 +1,225 @@
+USER GUIDE TO THE PLANETSOLVER STRUCTURE MODELING CODE
+
+PlanetSolver v0.5
+9 September 2021
+
+Developers:
+Alex R. Howe, NASA Goddard Space Flight Center
+Wesley Verne, Princetion University Class of 2013
+
+Included files
+README.txt
+maketar.sh
+makefile
+PlanetSolver source code
+Equation of state tables
+H-He pressure and entropy tables
+
+CONTENTS
+1. Description
+2. Installation
+3. Running
+4. Options and Limitations
+5. Output Format
+6. Errors
+
+1. DESCRIPTION
+
+PlanetSolver is a planetary structure modeling code designed to compute
+mass-radius relations and temperature-pressure-density profiles for a broad
+range of compositions.
+
+2. INSTALLATION
+
+Unpack the tarball into your work directory. Run the included makefile to
+compile the code.
+
+3. RUNNING
+
+PlanetSolver is run from the command line with arguments describing the planet
+to be modeled. The currently-supported arguments are:
+
+-c <central EOS file> <layer mass fraction>
+-cn <central EOS number> <layer mass fraction>
+-e <next EOS file> <layer mass fraction>
+-en <next EOS number> <layer mass fraction>
+-a <entropy> <metallicity> <layer mass fraction>
+-m <mass in m_earth>
+
+These arguments describe a planet structured in layers from the center outward,
+and the mass fractions are given as a decimal fraction of the total mass. The
+"-c" or "-cn" argument must be listed first, followed by the "-e" and "-en"
+arguments from the center of the planet outward. Other than this, the arguments
+may be in any order.
+
+The -a argument specifies the hydrogen-helium atmosphere/envelope, which is
+most important to specify the mass fraction. The code computes the structure
+based on the mass fraction of the atmosphere, while the mass fraction of the
+last layer below the atmosphere is allowed to float and computed as 1 minus the
+other layers regardless of the number given at the command line.
+
+NOTE: The code will still throw an error if the total given mass of the layers
+adds up to more than 1.0.
+
+For example, a super-earth with a mass of 5 M_Earth and a composition of
+30% iron, 65% silicates, and 5% hydrogen-helium by mass with s=6.0 and Z=10x
+would run at the command line as:
+
+./PlanetSolver -cn 1 0.3 -en 2 0.65 -a 6.0 10.0 0.05 -m 5.0
+
+For v0.3, running multiple models will require a separate script.
+
+4. OPTIONS AND LIMITATIONS
+
+Any number of layers may be included, and a range of equation of state files
+are available in the EOS_Tables subdirectory for specific layer compositions.
+Available numbered tables are:
+
+1. "Fe" (Iron, the standard core material)
+2. "pv" (Perovskite, a major mantle constituent)
+3. "MgO" (Periclase, the other major mantle constituent)
+4. "SiC" (the expected mantle material for carbon-rich planets)
+5. "Diamond" (included as a carbon-rich limit)
+6. "Platinum" (included as a high-density limit)
+7. "H2OVII" (Ice VII, the expected form of an ice mantle)
+
+Negative numbers are used for testing purposes.
+-1. White dwarf polytrope
+-2. Platinum (alternate EOS)
+-3. H2O VII (alternate EOS)
+-4. Fe (alternate EOS)
+-5. pv (alternate EOS)
+-6. Fe (another alternate EOS)
+-7. n=1 polytrope
+
+Other available tables include "+5" and "-5" tables, with densities 5% higher
+or lower than the published EOS. There are also several tables for
+undifferentiated planet compositions, and legacy tables for hydrogen-helium
+envelopes with specific entropy values.
+
+The "ptab" and "stab" files are pressure (p) and entropy (s) tables for a 
+hydrogen-helium mixture. The "-a" flag creates a hydrogen-helium envelope with
+entropy in units of Boltzmann's constant per baryon and metallicity as a
+multiple of solar metallicity. Typical values for entropy for mature planets
+are s=5.5 to s=6.5. "Hot start" conditions may approach s=10.0.
+
+The limits for the envelope are 4.0 <= s <= 17.0 and Z <= 100x Solar. These are
+hard-coded to halt execution, but are only a rule of thumb for reliability.
+The code may continue to give usable results if these limits are bypassed, and
+it may give warnings even with these ranges.
+
+The main problem for entropies outside these limits is that the equation of
+state fails to converge. ("Envelope iteration limit exceeded.") However, it
+may still converge well enough to continue execution.
+
+For high metallicities, the mean molecular weight is larger, and the
+atmosphere must be hotter to follow the same pressure-density curve. Thus, the
+entropy must be lower for the equation of state to converge. In testing, Z=300x
+required s=2.0, and Z=1000x failed to converge at all.
+
+5. OUTPUT FORMAT
+
+Currently, PlanetSolver prints the results to the command line in four values:
+
+1. Planet radius in R_Earth.
+2. Central pressure guess in Mbar.
+3. Central pressure step size in Mbar.
+4. Surface temperature in K. (The temperature profile will be more useful.)
+5. Planet mass in M_Earth.
+
+These values are printed as a vertical profile in the output file,
+"Planet.dat".
+
+NOTE: The "core" temperature is set to a constant at the outer boundary of the
+solid core. Accurate calculations of the internal temperature profile of the
+solid core are not yet implemented.
+
+6. ERRORS
+
+There are also warnings printed to the command line that are related to the
+integration at various stages.
+
+"Envelope iteration limit exceeded."
+This occurs in HHeComp.cpp and indicates that the equation of state was unable
+to converge to the correct pressue and entropy within the tolerances.
+
+"Error: negative pressure encountered."
+This occurs in Planet.cpp and indicates something breaking in the structure
+model.
+
+"Planet integration failed."
+This occurs in Planet.cpp and indicates that the code could not solve the
+entire structure of the planet from center to surface. This can happen if the
+atmosphere is "too fluffy," and the planet has an unphysically large radius.
+
+"Iteration limit exceeded."
+This occurs in PlanetSolver.cpp and indicates that the code failed to converge
+to the input mass for the planet (as a function of central pressure) within the
+tolerances.
+
+NOTE: These warnings do not necessarily mean that the code has failed. They may
+indicate that the tolerances need to be relaxed or that a more sophisticated
+step size control scheme is needed for higher precision. For many applications,
+the results will be "good enough" despite the warnings.
+
+Comparison of results with models that converged without warnings should be
+used to determine the quality of results. Examining the step-by-step results in
+"Planet.dat" may also be helpful.
+
+CHANGE LOG:
+
+v0.5
+Implemented alternative mass loss prescriptions for K- and M-dwarfs. This adds
+a new "startype" parameter to the "-star" flag.
+Fixed Planet::printRecord() so that it still works with no atmosphere.
+Added the EqGen program to generate new EOS files, including mixes, copied
+from wemEG in the old code.
+Added a "low entropy" alert on the command line.
+Added spelled-out command line options.
+Added "-help" command line option.
+Added "-pressure" command line option for the "surface" pressure.
+Added "unrecognized argument" check.
+Added "-struct" output file argument.
+Added "-integration" command line argument.
+NOTE: "-rad" and "-verbose" options from the old code discarded.
+
+v0.4
+Implemented cooling and mass loss.
+Probably some other stuff I should have kept track of.
+
+v0.3
+Vectorized all arrays.
+EOS fails to converge if the entropy is s<5--COULD NOT REPRODUCE.
+Changed the layer boundaries to instead inputting the mass fraction of each
+layer (including of the core). (The old system was confusing.)
+NOTE: the mass fraction for the top layer below the envelope is a dummy. The
+model will automatically reset it to a total mass fraction of 1, although it
+will return an error if the total mass fraction is greater than 1.
+Set all step sizes, iteration cutoffs, required precisions, and deltas at the
+top of their respective files.
+Implemented temperature in PrintRecord and cleaned up the output.
+Updated the documentation.
+
+v0.2
+Implemented the printRecord() subroutine.
+Reduced the command line output to the final result.
+NOTE: If convergence nominally fails, the code will still produce an output
+that may be "close enough" to the correct values.
+Implemented the setEntTab() subroutine and HHeComp class to handle arbitrary
+entropy.
+Tested the arbitrary entropy sections to make sure it was getting the EOS
+tables right.
+Added hard-coded limits on entropy and metallicity.
+Clarified the warning messages.
+Changed the output line to conform to Planet.dat.
+Updated the documentation.
+
+TO-DO LIST:
+
+1. Implement core temperature corrections.
+2. Use a proper input file that is robust against missing arguments like in
+   APOLLO.
+3. Consider alternate integration limits than min_P and 1000 R_Earth.
+4. Implement a radiative atmosphere.
+5. Convert everything to cgs.
+6. Implement a Henyey solver.

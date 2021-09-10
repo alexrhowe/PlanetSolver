@@ -1,0 +1,278 @@
+#include "stdafx.h"
+#include "files.h"
+#include "HHeComp.h"
+
+using namespace cons;
+
+const double Planet::MAX_RAD = 1000*R_EARTH; // Maximum radius to determine if the model fails to converge.
+const int Planet::MAX_STEP = 1000000;        // Maximum number of steps used by the integrator.
+// minP determines the "surface pressure" of the planet to cut off the integrator.
+
+bool Planet::EOSBoundaryCompare::operator()(const EOSBoundary& p1, const EOSBoundary& p2) const{
+  return p1.second > p2.second;
+}
+
+Planet::Planet(double numH, double pCentral, double setP, EOS* EOSc){
+  h = numH;
+  eos = EOSc;
+  minP = setP;
+  rVals.push_back(0.0);
+  rhoVals.push_back(eos->getRho(pCentral));
+  mVals.push_back(0.0);
+  pVals.push_back(pCentral);
+  iVals.push_back(0.0);
+  T = 0.0;
+}
+
+void Planet::findVals(int interval, double entropy, double metals, double mcore, double mrock){
+  int size;
+  if(pVals.back()==0.) size = pVals.size()-2;
+  else size = pVals.size()-1;
+  
+  iceCV = 0.;
+  HHeComp* hhe = new HHeComp(metals);
+  double menv = 0.;
+  
+  int j=0;
+  // Heat capacity in MKS
+  while(menv < boundaries.top().second/M_EARTH){
+    menv = mVals[j]/M_EARTH;
+    if(mVals[j]>=mrock && mVals[j]<=mcore){
+      double cv = 3.3e3 + 2.21e4 * exp(-5.8*pVals[j]);
+      if(pVals[j]>0.022 && j>0) iceCV += cv * (mVals[j]-mVals[j-1]);
+      else if(j>0) iceCV += 4.2e3 * (mVals[j]-mVals[j-1]);
+    }
+    j++;
+  }
+  hhe->newton(pVals[j],entropy);
+  tCore = pow(10,hhe->getT());
+  pCore = pVals[j];
+
+  Tdm = 0.;
+  for(int i=j; i<size-1; i+=interval){
+    hhe->newton(pVals[i],entropy);
+    Tdm += pow(10,hhe->getT()) * (mVals[i+interval]-mVals[i]);
+  }
+
+  hhe->newton(pVals[size-1],entropy);
+  tSurf = pow(10,hhe->getT());
+}
+
+void Planet::printRecord(string outFile, int interval, double entropy, double metals){
+  ofstream outputFile (outFile.c_str());
+
+  outputFile << "Radius (Earth Radii) | Density (g cm^-3) | ";
+  outputFile << "Pressure (Mbar) | Temperature (K) | Mass (Earth Masses)\n";
+  double cdi;
+  double base = 0.;
+
+  HHeComp* hhe = new HHeComp(metals);
+  double tcore = 0.;
+  double menv = 0.;
+  int j=0;
+
+  bool hasAtm = false;
+  if(boundaries.top().first->getRho(1.0,300)<100.) hasAtm=true;
+  
+  while(menv < boundaries.top().second/M_EARTH){
+    menv = mVals[j]/M_EARTH;
+    j++;
+  }
+  hhe->newton(pVals[j]*10,entropy);
+  tcore = pow(10,hhe->getT());
+  double tenv = 0.;
+
+  int size;
+  if(pVals.back()==0.) size = pVals.size()-2;
+  else size = pVals.size()-1;
+  
+  for(int i=0; i<size; i+=interval){
+    if(hasAtm){
+      hhe->newton(pVals[i]*10,entropy); // given pressure and entropy, solves for density and temperature
+      if(mVals[i]/M_EARTH >= boundaries.top().second/M_EARTH) tenv = pow(10,hhe->getT());
+      else tenv = tcore;
+    }
+    else tenv = tcore;
+    
+    outputFile.precision(4);
+    outputFile << (rVals[i]/R_EARTH) << scientific << "\t";
+    outputFile.precision(3);
+    outputFile << (rhoVals[i]/1.e3) << scientific << "\t";  // density in cgs
+    outputFile << (pVals[i]/1.e11) << fixed << "\t";   // pressure in Mbar
+    outputFile << tenv << fixed << "\t";
+    outputFile.precision(6);
+    outputFile << (mVals[i]/M_EARTH) << fixed << "\n";
+  }
+  if(hasAtm){
+    hhe->newton(pVals[size]*10,entropy);
+    tenv = pow(10,hhe->getT());
+  }
+  else tenv = tcore;
+  
+  outputFile.precision(4);
+  outputFile << (rVals.back()/R_EARTH) << scientific << "\t";
+  outputFile.precision(3);
+  outputFile << (rhoVals.back()/1.e3) << scientific << "\t";
+  outputFile << (pVals.back()/1.e11) << fixed << "\t";
+  outputFile << tenv << fixed << "\t";
+  outputFile.precision(6);
+  outputFile << (mVals.back()/M_EARTH) << fixed << "\n";
+  printf("%f %e %e %f %f\n",rVals.back()/R_EARTH,rhoVals[0]/1.e3,pVals[0]/1.e11,tenv,mVals.back()/M_EARTH);  
+}
+
+void Planet::addEOS(double newM, EOS* newEOS){
+  boundaries.push(EOSBoundary(newEOS, newM));
+}
+
+void Planet::setT(double newT){
+  T = newT;
+}
+
+void Planet::integrate(){
+  if(pVals.back() <= 0.0){
+    throw "Error: negative pressure encountered.\n";
+  }
+  
+  int i=0;
+  while(pVals.back() > minP && rVals.back() < MAX_RAD){
+    if(i>MAX_STEP){
+      printf("Planet integration failed.\n");
+      break;
+    }
+    checkBoundary();
+    step();
+    i++;
+  }
+}
+
+void Planet::step(){
+  double rho1 = kRho1();
+  double m1   =   kM1();
+  double rho2 = kRho2(rho1, m1);
+  double m2   =   kM2(rho1, m1);
+  double rho3 = kRho3(rho2, m2);
+  double m3   =   kM3(rho2, m2);
+  double rho4 = kRho4(rho3, m3);
+  double m4   =   kM4(rho3, m3);
+
+  rhoVals.push_back(rhoVals.back() + ((h/6)*(rho1 + 2*rho2 + 2*rho3 + rho4)));
+  mVals.push_back(mVals.back() + ((h/6)*(m1 + 2*m2 + 2*m3 + m4)));
+  rVals.push_back(rVals.back() + h);
+
+  double newP = eos->getP(rhoVals.back(), getT());
+  
+  if(newP<=pVals.back()){
+    pVals.push_back(newP);
+  }
+  else{
+    pVals.push_back(pVals.back());
+  }
+
+  double mstep = (h/6)*(m1 + 2*m2 + 2*m3 + m4);
+  double Cdstep = 2./3. * mstep * (rVals.back()+h)*(rVals.back()+h);
+  iVals.push_back(iVals.back()+Cdstep);
+}
+
+void Planet::checkBoundary(){
+  if(!boundaries.empty() && (mVals.back() > boundaries.top().second)){
+    eos = boundaries.top().first;
+    rhoVals[rhoVals.size()-1] = eos->getRho(pVals.back(), T);
+    boundaries.pop();
+  }
+}
+
+double Planet::getT(){
+  return T;
+}
+
+double Planet::getR(){
+  return rVals.back();
+}
+
+double Planet::getMTotal(){
+  return mVals.back();
+}
+
+double Planet::getTcore(){
+  return tCore;
+}
+
+double Planet::getTsurf(){
+  return tSurf;
+}
+
+double Planet::getPcore(){
+  return pCore;
+}
+
+double Planet::getTdm(){
+  return Tdm;
+}
+
+double Planet::getIceCV(){
+  return iceCV;
+}
+
+// runge-kutta functions
+double Planet::f(double rn, double rhon, double mn)
+{
+  if (rn > 0){
+    return -((G * mn) / (rn * rn)) * rhon / eos->getdPdRho(rhon, T);
+  }
+  else
+    return 0.0;
+}
+
+double Planet::g(double rn, double rhon)
+{
+    return (4 * PI * rn * rn * rhon);
+}
+
+double Planet::kRho1()
+{
+    return f(rVals.back(), rhoVals.back(), mVals.back());
+}
+
+double Planet::kM1()
+{
+    return g(rVals.back(), rhoVals.back());
+}
+
+double Planet::kRho2(double kRho, double kM)
+{
+    return f(rVals.back()   + (0.5 * h), 
+	     rhoVals.back() + (0.5 * h * kRho), 
+	     mVals.back()   + (0.5 * h * kM));
+}
+
+double Planet::kM2(double kRho, double kM)
+{
+    return g(rVals.back()   + (0.5 * h), 
+	     rhoVals.back() + (0.5 * h * kRho));
+}
+
+double Planet::kRho3(double kRho, double kM)
+{
+	return f(rVals.back()   + (0.5 * h), 
+		 rhoVals.back() + (0.5 * h * kRho), 
+		 mVals.back()   + (0.5 * h * kM));
+}
+
+double Planet::kM3(double kRho, double kM)
+{
+	return g(rVals.back()   + (0.5 * h), 
+		 rhoVals.back() + (0.5 * h * kRho));
+}
+
+double Planet::kRho4(double kRho, double kM)
+{
+	return f(rVals.back()   + h, 
+		 rhoVals.back() + (h * kRho), 
+		 mVals.back()   + (h * kM));
+}
+
+double Planet::kM4(double kRho, double kM)
+{
+	return g(rVals.back()   + h, 
+		 rhoVals.back() + (h * kRho));
+}
